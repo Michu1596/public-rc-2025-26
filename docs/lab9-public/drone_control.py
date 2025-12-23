@@ -77,19 +77,35 @@ def run_single_task(*, wind: bool, rotated_gates: bool, rendering_freq: float, f
 
     # TODO: Design PID control
     pid_roll = PID(
-        gain_prop = 0, gain_int = 0, gain_der = 0,
+        gain_prop = 0.1, gain_int = 0.01, gain_der = 0.01,
         sensor_period = model.opt.timestep, output_limits=(-100, 100)
     )
 
     pid_pitch = PID(
-        gain_prop = 0, gain_int = 0, gain_der = 0,
+        gain_prop = 0.1, gain_int = 0.01, gain_der = 0.01,
         sensor_period = model.opt.timestep, output_limits=(-100, 100)
     )
 
     pid_yaw = PID(
-        gain_prop = 0, gain_int = 0, gain_der = 0,
+        gain_prop = 6, gain_int = 0.1, gain_der = 3,
         sensor_period = model.opt.timestep, output_limits=(-100, 100)
     )
+
+    pid_z = PID(
+        gain_prop = 10.0, gain_int = 5.0, gain_der = 2.0,
+        sensor_period = model.opt.timestep, output_limits=(0, 20)
+    )
+
+    pid_x = PID(
+        gain_prop = 5.0, gain_int = 0.10, gain_der = 8.5,
+        sensor_period = model.opt.timestep, output_limits=(-15, 15)
+    )
+
+    pid_y = PID(
+        gain_prop = 5.0, gain_int = 0.10, gain_der = 8.5,
+        sensor_period = model.opt.timestep, output_limits=(-15, 15)
+    )
+
     # END OF TODO
 
     task_label = f"rotated={'yes' if rotated_gates else 'no'}, wind={'yes' if wind else 'no'}"
@@ -103,7 +119,7 @@ def run_single_task(*, wind: bool, rotated_gates: bool, rendering_freq: float, f
     # If you want the simulation to be displayed more slowly, decrease rendering_freq
     # Note that this DOES NOT change the timestep used to approximate the physics of the simulation!
     drone_simulator = DroneSimulator(
-        model, data, view, wind_change_prob = wind_change_prob, rendering_freq = rendering_freq
+        model, data, view, wind_change_prob = wind_change_prob, rendering_freq = rendering_freq 
     )
 
     # TODO: Define additional variables if needed
@@ -119,26 +135,40 @@ def run_single_task(*, wind: bool, rotated_gates: bool, rendering_freq: float, f
             
             # TODO: define the current target position
             pos_target = pos_targets[0].copy()
+
+            target_x = 1
+            target_y = 1
             # END OF TODO
 
             # TODO: use PID controllers to steer the drone
-            desired_thrust = 3.2496
+            # desired_thrust = 3.2496
+            desired_thrust = pid_z.output_signal(pos_target[2], [current_pos[2], previous_pos[2]])
 
-            desired_roll = 0
-            desired_pitch = 0
-            desired_yaw = 0
 
-            roll_thrust = pid_roll.output_signal(desired_roll, [current_orien[0], previous_orien[0]])
-            pitch_thrust = pid_pitch.output_signal(desired_pitch, [current_orien[1], previous_orien[1]])
-            yaw_thrust = -pid_yaw.output_signal(desired_yaw, [current_orien[2], previous_orien[2]])
+            # calculate desired yaw angle to face the target
+            delta_x = target_x - current_pos[0]
+            delta_y = target_y - current_pos[1]
+            desired_yaw = math.degrees(math.atan2(delta_y, delta_x))
+            print(f"Desired yaw: {desired_yaw}")
+
+            # calculatre desired roll and pitch to move towards the target
+            desired_roll = - pid_y.output_signal( - target_y, [current_pos[1], previous_pos[1]])
+            desired_pitch = pid_x.output_signal( - target_x, [current_pos[0], previous_pos[0]])
+            print(f"Desired pitch: {desired_pitch}")
+
+            roll_thrust = - pid_roll.output_signal(desired_roll, [current_orien[0], previous_orien[0]])
+            pitch_thrust = - pid_pitch.output_signal(desired_pitch, [current_orien[1], previous_orien[1]])
+            yaw_thrust = pid_yaw.output_signal(desired_yaw, [current_orien[2], previous_orien[2]])
+            print(f"Roll thrust: {roll_thrust}, Pitch thrust: {pitch_thrust}, Yaw thrust: {yaw_thrust} Trust: {desired_thrust}")
+            print(f"Current orientation: Roll: {current_orien[0]}, Pitch: {current_orien[1]}, Yaw: {current_orien[2]}")
             # END OF TODO
 
             # For debugging purposes you can uncomment, but keep in mind that this slows down the simulation
             
-            # data = np.array([pos_target + [desired_roll, desired_pitch, desired_yaw], np.concat([current_pos, current_orien])]).T
-            # row_names = ["x", "y", "z", "roll", "pitch", "yaw"]
-            # headers = ["desired", "current"]
-            # print(pd.DataFrame(data, index=row_names, columns=headers))
+            data = np.array([pos_target + [desired_roll, desired_pitch, desired_yaw], np.concat([current_pos, current_orien])]).T
+            row_names = ["x", "y", "z", "roll", "pitch", "yaw"]
+            headers = ["desired", "current"]
+            print(pd.DataFrame(data, index=row_names, columns=headers))
 
             drone_simulator.sim_step(
                 desired_thrust, roll_thrust=roll_thrust,
