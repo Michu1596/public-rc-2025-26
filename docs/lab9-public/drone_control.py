@@ -114,7 +114,7 @@ def run_single_task(
 
     pid_x_thrust = PID(
         gain_prop=10,
-        gain_int=0,
+        gain_int=0.5,
         gain_der=20,
         sensor_period=model.opt.timestep,
         output_limits=(-15, 15),
@@ -122,7 +122,7 @@ def run_single_task(
 
     pid_y_thrust = PID(
         gain_prop=10,
-        gain_int=0,
+        gain_int=0.5,
         gain_der=20,
         sensor_period=model.opt.timestep,
         output_limits=(-15, 15),
@@ -151,10 +151,9 @@ def run_single_task(
     )
 
     # TODO: Define additional variables if needed
-    desired_yaw = 0
-    lenght_xy = None
-    i = 0
-    step = 0 # from 0 to 2
+    lenght_xy = None # distance to the target in the XY plane
+    i = 0 # index of the current target position
+    step = 0 # from 0 to 2, steps of going through the gate: 0 - before gate, 1 - in the gate, 2 - after the gate
     desired_yaw = yaw_angle_targets[i]
 
     target_x = pos_targets[i][0] 
@@ -171,7 +170,6 @@ def run_single_task(
                 break
 
             # TODO: define the current target position
-            pos_target = pos_targets[i].copy()
             if lenght_xy is not None and lenght_xy < 0.25 and i <= len(pos_targets) - 1:
                 desired_yaw = yaw_angle_targets[i]
 
@@ -201,14 +199,9 @@ def run_single_task(
             # desired_thrust = 3.2496
             current_x = current_pos[0]
             current_y = current_pos[1]
-            current_z = current_pos[2]
 
             previous_x = previous_pos[0]
             previous_y = previous_pos[1]
-            previous_z = previous_pos[2]
-
-            current_roll = current_orien[0]
-            current_pitch = current_orien[1]
             current_yaw = current_orien[2]
 
             desired_thrust = pid_z.output_signal(
@@ -223,7 +216,6 @@ def run_single_task(
             # calculate desired x thrust and y thrust to move towards the target
             desired_x_thrust = pid_x_thrust.output_signal(target_x, [current_x, previous_x])
             desired_y_thrust = pid_y_thrust.output_signal(target_y, [current_y, previous_y])
-            # print(f"Desired x thrust: {desired_x_thrust}, Desired y thrust: {desired_y_thrust}")
 
             # based on current yaw, convert desired x and y thrust to desired roll and pitch
 
@@ -236,7 +228,6 @@ def run_single_task(
                 + desired_x_thrust * math.cos(current_yaw_rad)
                 + desired_y_thrust * math.sin(current_yaw_rad)
             )
-            # print(f"Desired roll: {desired_roll}, Desired pitch: {desired_pitch}")
 
             roll_thrust = - pid_roll.output_signal(
                 desired_roll, [current_orien[0], previous_orien[0]]
@@ -246,13 +237,7 @@ def run_single_task(
             )
             yaw_thrust = pid_yaw.output_signal(
                 desired_yaw, [current_orien[2], previous_orien[2]]
-            )
-            # print(
-            #     f"Roll thrust: {roll_thrust}, Pitch thrust: {pitch_thrust}, Yaw thrust: {yaw_thrust} Trust: {desired_thrust}"
-            # )
-            # print(
-            #     f"Current orientation: Roll: {current_orien[0]}, Pitch: {current_orien[1]}, Yaw: {current_orien[2]}"
-            # )
+            )            
             # END OF TODO
 
             # For debugging purposes you can uncomment, but keep in mind that this slows down the simulation
