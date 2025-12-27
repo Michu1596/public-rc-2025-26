@@ -15,7 +15,6 @@ class PID:
         self.gain_int = gain_int
         self.sensor_period = sensor_period
         # TODO: define additional attributes you might need
-        self.previous_values = []
         self.integral = 0
         self.output_limits = output_limits
         # END OF TODO
@@ -44,12 +43,11 @@ class PID:
         max_val, min_val = (
             abs(self.output_limits[0] / (self.gain_int + 1e-3)),
             -abs(self.output_limits[1] / (self.gain_int + 1e-3)),
-        )
+        ) # we devide by gain_int to avoid excessive clipping when gain_int is high
         self.integral = clip(self.integral, min_val, max_val)
         integral = self.gain_int * self.integral
 
         derivative = self.gain_der * (current - previous) / self.sensor_period
-        # print(f"Proportional: {proportional}, Integral: {integral}, Derivative: {derivative}")
 
         return clip(
             proportional + integral - derivative,
