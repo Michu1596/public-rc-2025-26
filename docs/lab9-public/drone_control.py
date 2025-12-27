@@ -82,16 +82,16 @@ def run_single_task(
     # TODO: Design PID control
     pid_roll = PID(
         gain_prop=0.1,
-        gain_int=0.01,
-        gain_der=0.02,
+        gain_int=0.0,
+        gain_der=0.06,
         sensor_period=model.opt.timestep,
         output_limits=(-100, 100),
     )
 
     pid_pitch = PID(
         gain_prop=0.1,
-        gain_int=0.01,
-        gain_der=0.02,
+        gain_int=0.0,
+        gain_der=0.06,
         sensor_period=model.opt.timestep,
         output_limits=(-100, 100),
     )
@@ -106,32 +106,24 @@ def run_single_task(
 
     pid_z = PID(
         gain_prop=10.0,
-        gain_int=0.1,
+        gain_int=2,
         gain_der=5.0,
         sensor_period=model.opt.timestep,
         output_limits=(-100, 100),
     )
 
-    pid_xy_length = PID(
-        gain_prop=1,
-        gain_int=0.10,
-        gain_der=4,
+    pid_x_thrust = PID(
+        gain_prop=10,
+        gain_int=0,
+        gain_der=20,
         sensor_period=model.opt.timestep,
         output_limits=(-15, 15),
     )
 
-    pid_xy_angle_rad = PID(
-        gain_prop=5,
-        gain_int=0.1,
-        gain_der=4,
-        sensor_period=model.opt.timestep,
-        output_limits=(-6.28, 6.28),
-    )
-
-    pid_y = PID(
-        gain_prop=5.0,
-        gain_int=0.10,
-        gain_der=8.5,
+    pid_y_thrust = PID(
+        gain_prop=10,
+        gain_int=0,
+        gain_der=20,
         sensor_period=model.opt.timestep,
         output_limits=(-15, 15),
     )
@@ -155,13 +147,19 @@ def run_single_task(
         data,
         view,
         wind_change_prob=wind_change_prob,
-        rendering_freq=rendering_freq/1000,
+        rendering_freq=rendering_freq,
     )
 
     # TODO: Define additional variables if needed
-    previous_length_xy = None
-    previous_velocity_trust_xy_angle = None
-    previous_velocity_angle = None
+    desired_yaw = 0
+    lenght_xy = None
+    i = 0
+    step = 0 # from 0 to 2
+    desired_yaw = yaw_angle_targets[i]
+
+    target_x = pos_targets[i][0] 
+    target_y = pos_targets[i][1] 
+    target_z = pos_targets[i][2] 
     # END OF TODO
 
     try:
@@ -173,10 +171,30 @@ def run_single_task(
                 break
 
             # TODO: define the current target position
-            pos_target = pos_targets[0].copy()
+            pos_target = pos_targets[i].copy()
+            if lenght_xy is not None and lenght_xy < 0.25 and i <= len(pos_targets) - 1:
+                desired_yaw = yaw_angle_targets[i]
 
-            target_x = 1
-            target_y = 1
+                target_x = pos_targets[i][0] 
+                target_y = pos_targets[i][1] 
+                target_z = pos_targets[i][2] 
+
+                xy_clearance = 0.3
+                if step == 0 and i < len(pos_targets) - 1:
+                    target_x += xy_clearance * math.cos(math.radians(desired_yaw))
+                    target_y += xy_clearance * math.sin(math.radians(desired_yaw))
+                    target_z += .12
+                    step = 1
+                elif step == 1 and i < len(pos_targets) - 1:
+                    step = 2
+                    target_z += .12
+                elif step == 2 and i < len(pos_targets) - 1:
+                    i += 1
+                    step = 0
+                    target_x -= .5 * math.cos(math.radians(desired_yaw))
+                    target_y -= .5 * math.sin(math.radians(desired_yaw))
+                    target_z += .12
+                    
             # END OF TODO
 
             # TODO: use PID controllers to steer the drone
@@ -185,92 +203,69 @@ def run_single_task(
             current_y = current_pos[1]
             current_z = current_pos[2]
 
+            previous_x = previous_pos[0]
+            previous_y = previous_pos[1]
+            previous_z = previous_pos[2]
+
             current_roll = current_orien[0]
             current_pitch = current_orien[1]
             current_yaw = current_orien[2]
 
             desired_thrust = pid_z.output_signal(
-                pos_target[2], [current_pos[2], previous_pos[2]]
+                target_z, [current_pos[2], previous_pos[2]]
             )
 
             # calculate desired yaw angle to face the target
             delta_x = target_x - current_pos[0]
             delta_y = target_y - current_pos[1]
             lenght_xy = math.sqrt(delta_x**2 + delta_y**2)
-            if lenght_xy > 0.1:
-                desired_yaw = math.degrees(
-                    math.atan2(delta_y, delta_x)
-                )  # TODO incorporate vector length to avoid jittering at close distances
-            print(f"Desired yaw: {desired_yaw}")
 
-            # calculatre desired roll and pitch to move towards the target
-            # desired_roll = - pid_y.output_signal( - target_y, [current_pos[1], previous_pos[1]])
-            # desired_pitch = pid_x.output_signal( - target_x, [current_pos[0], previous_pos[0]])
-            # print(f"Desired pitch: {desired_pitch}")
+            # calculate desired x thrust and y thrust to move towards the target
+            desired_x_thrust = pid_x_thrust.output_signal(target_x, [current_x, previous_x])
+            desired_y_thrust = pid_y_thrust.output_signal(target_y, [current_y, previous_y])
+            # print(f"Desired x thrust: {desired_x_thrust}, Desired y thrust: {desired_y_thrust}")
 
-            # Based on current position and target position, calculate desired roll and pitch factors
-            nose_to_target_angle_rad = math.radians(desired_yaw - current_yaw)
-            xy_velocity_vector = np.array(
-                [current_pos[0] - previous_pos[0], current_pos[1] - previous_pos[1]]
+            # based on current yaw, convert desired x and y thrust to desired roll and pitch
+
+            current_yaw_rad = math.radians(current_yaw)
+            desired_roll = (
+                desired_x_thrust * math.sin(current_yaw_rad)
+                - desired_y_thrust * math.cos(current_yaw_rad)
             )
-            velocity_angle = (
-                math.atan2(xy_velocity_vector[1], xy_velocity_vector[0])
-                if np.linalg.norm(xy_velocity_vector) > 0.0001
-                else 0
+            desired_pitch = (
+                + desired_x_thrust * math.cos(current_yaw_rad)
+                + desired_y_thrust * math.sin(current_yaw_rad)
             )
-            desired_trust_angle = pid_xy_angle_rad.output_signal(
-                nose_to_target_angle_rad,
-                [
-                    velocity_angle,
-                    previous_velocity_angle
-                    if previous_velocity_angle is not None
-                    else velocity_angle,
-                ],
-            )
-            previous_velocity_angle = velocity_angle
-            print(f"desired trust angle: {desired_trust_angle} Nose to target angle: {nose_to_target_angle_rad} Current velocity angle: {velocity_angle}")
+            # print(f"Desired roll: {desired_roll}, Desired pitch: {desired_pitch}")
 
-            pitch_factor = math.cos(desired_trust_angle)
-            roll_factor = math.sin(desired_trust_angle)
-
-            # calculate signal based on distance to target in XY plane
-            if previous_length_xy is None:
-                previous_length_xy = lenght_xy
-            signal_xy = pid_xy_length.output_signal(0, [lenght_xy, previous_length_xy])
-            previous_length_xy = lenght_xy
-
-            desired_pitch = -pitch_factor * signal_xy
-            desired_roll = roll_factor * signal_xy
-            print(f"Desired roll: {desired_roll}, Desired pitch: {desired_pitch}")
-
-            roll_thrust = -pid_roll.output_signal(
+            roll_thrust = - pid_roll.output_signal(
                 desired_roll, [current_orien[0], previous_orien[0]]
             )
-            pitch_thrust = -pid_pitch.output_signal(
+            pitch_thrust = - pid_pitch.output_signal(
                 desired_pitch, [current_orien[1], previous_orien[1]]
             )
             yaw_thrust = pid_yaw.output_signal(
-                desired_yaw * 0 + 90, [current_orien[2], previous_orien[2]]
+                desired_yaw, [current_orien[2], previous_orien[2]]
             )
-            print(
-                f"Roll thrust: {roll_thrust}, Pitch thrust: {pitch_thrust}, Yaw thrust: {yaw_thrust} Trust: {desired_thrust}"
-            )
-            print(
-                f"Current orientation: Roll: {current_orien[0]}, Pitch: {current_orien[1]}, Yaw: {current_orien[2]}"
-            )
+            # print(
+            #     f"Roll thrust: {roll_thrust}, Pitch thrust: {pitch_thrust}, Yaw thrust: {yaw_thrust} Trust: {desired_thrust}"
+            # )
+            # print(
+            #     f"Current orientation: Roll: {current_orien[0]}, Pitch: {current_orien[1]}, Yaw: {current_orien[2]}"
+            # )
             # END OF TODO
 
             # For debugging purposes you can uncomment, but keep in mind that this slows down the simulation
 
-            data = np.array(
-                [
-                    pos_target + [desired_roll, desired_pitch, desired_yaw],
-                    np.concat([current_pos, current_orien]),
-                ]
-            ).T
-            row_names = ["x", "y", "z", "roll", "pitch", "yaw"]
-            headers = ["desired", "current"]
-            print(pd.DataFrame(data, index=row_names, columns=headers))
+            # data = np.array(
+            #     [
+            #         pos_target + [desired_roll, desired_pitch, desired_yaw],
+            #         np.concat([current_pos, current_orien]),
+            #     ]
+            # ).T
+            # row_names = ["x", "y", "z", "roll", "pitch", "yaw"]
+            # headers = ["desired", "current"]
+            # print(pd.DataFrame(data, index=row_names, columns=headers))
 
             drone_simulator.sim_step(
                 desired_thrust,
@@ -295,7 +290,7 @@ def run_single_task(
 def main(
     wind: bool = False,
     rotated_gates: bool = False,
-    all_tasks: bool = False,
+    all_tasks: bool = True,
     runs: int = 10,
     rendering_freq: float = 3.0,
     fixed_track: bool = False,
