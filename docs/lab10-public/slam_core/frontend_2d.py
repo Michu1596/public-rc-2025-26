@@ -43,20 +43,46 @@ class SLAM2DFrontend:
             x, y = self.initial_pose[0]
             angle = self.initial_pose[1]
             ### TODO ###
-            ...
+            steps_per_side = 10
+            step_size = 1
+            for _ in range(4):
+                for _ in range(steps_per_side):
+                    delta_x = math.cos(angle) * step_size
+                    delta_y = math.sin(angle) * step_size
+                    x += delta_x
+                    y += delta_y
+                    self.true_poses.append(((x,y), 0)) # Zero na siłę bo w wizualizacji coś dziwnego się z tym kątem dzieje
+                    print(f"Added pose: {self.true_poses[-1]}")
+                
+                angle += math.pi / 2
             ### END TODO ###
         elif self.trajectory_shape == "circle":
             x, y = self.initial_pose[0]
             angle = self.initial_pose[1]
             ### TODO ###
-            ...
+            steps = 30
+            step_size = 1
+            for _ in range(steps):
+                    delta_x = math.cos(angle) * step_size
+                    delta_y = math.sin(angle) * step_size
+                    x += delta_x
+                    y += delta_y
+                    self.true_poses.append(((x,y), 0)) # Zero na siłę bo w wizualizacji coś dziwnego się z tym kątem dzieje
+                    angle += math.pi * 2 / steps
             ### END TODO ###
         elif self.trajectory_shape == "line":
             self.true_poses = [self.initial_pose]
             x, y = self.initial_pose[0]
             angle = self.initial_pose[1]
             ### TODO ###
-            ...
+            steps = 30
+            step_size = 0.1
+            for _ in range(steps):
+                    delta_x = math.cos(angle) * step_size
+                    delta_y = math.sin(angle) * step_size
+                    x += delta_x
+                    y += delta_y
+                    self.true_poses.append(((x,y), 0)) # Zero na siłę bo w wizualizacji coś dziwnego się z tym kątem dzieje
             ### END TODO ###
 
     def generate_measurements(self) -> None:
@@ -75,8 +101,14 @@ class SLAM2DFrontend:
         for i in range(len(self.true_poses) - 1):
             ### TODO ###
             ...
+            (prev_x, prev_y), prev_theta = self.true_poses[i]
+            (curr_x, curr_y), curr_theta = self.true_poses[i+1]
+            delta_x = curr_x - prev_x
+            delta_y = curr_y - prev_y
+            delta_theta = curr_theta - prev_theta
             ### END TODO ###
             true_odometry.append((delta_x, delta_y, delta_theta))
+            print(f"True odometry {i}: {(delta_x, delta_y, delta_theta)}")
 
         # Add noise to odometry measurements
         for odometry in true_odometry:
@@ -130,6 +162,13 @@ class SLAM2DFrontend:
         for lm in landmarks:
             ### TODO ###
             ...
+            lm_x, lm_y = lm
+            dist = math.sqrt((current_x - lm_x) ** 2 + (current_y - lm_y) ** 2)
+            rel_x = lm_x - current_x
+            rel_y = lm_y - current_y
+            theta = math.atan2(rel_y,rel_x)
+            angle = theta - current_angle # NOTE idk if i shuld subtract curr angle
+            print(f"Observation to landmark {lm}: distance={dist}, angle={angle}")
             ### END TODO ###
             distance_observations.append(dist)
             angle_observations.append(angle)

@@ -34,7 +34,9 @@ def main():
 
     print(f"True Poses: {frontend.true_poses}")
     print(f"True Landmarks: {frontend.true_landmarks}")
-    print(f"Noisy Odometry Measurements: {frontend.odometry_measurements}")
+    print(f"Noisy Odometry Measurements: ")
+    for odom in frontend.odometry_measurements:
+        print(odom)
     print(
         f"Noisy Sensor Measurements: {frontend.sensor_measurements}"
     )  # Can be very long

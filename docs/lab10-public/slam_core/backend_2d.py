@@ -2,6 +2,7 @@ from typing import List
 
 import numpy as np
 from scipy import optimize
+import math
 
 from slam_core.models import (
     OdometryMeasurement,
@@ -33,8 +34,8 @@ class SLAM2DBackend:
         # We optimize over poses and landmarks simuulatenously, so they have to be packed into a single, flat numpy array
         # Parameters: [pose_0, pose_1, ..., pose_N, lm1_x, lm1_y, lm2_x, lm2_y, ...]
         ### TODO ###
-        num_poses = ...
-        initial_params = ...
+        initial_params = np.concatenate([np.array(initial_poses_guess).flatten(), np.array(initial_landmarks_guess).flatten()])
+        num_poses = len(initial_poses_guess)
         ### END TODO ###
 
         # Optimize
@@ -69,8 +70,8 @@ class SLAM2DBackend:
         """
         # Unpack parameters
         ### TODO ###
-        poses = ...
-        landmark_coords = ...
+        poses = params[:num_poses * 3].reshape((-1,3))
+        landmark_coords = params[num_poses * 3:].reshape((-1,2))
         ### END TODO ###
 
         # Reconstruct landmarks list [(x,y), ...]
@@ -87,9 +88,19 @@ class SLAM2DBackend:
         # 1. Movement Penalty (Odometry Error)
         # For each odometry measurement, calculate the expected movement based on the current and next pose, and compare to the measured movement.
         ### TODO ###
+        calc_movements_deltas = []
+        for i in range(len(poses) - 1):
+            prev_x, prev_y, prev_theta = poses[i]
+            curr_x, curr_y, curr_theta = poses[i + 1]
+            calc_movements_deltas.append((curr_x-prev_x, curr_y-prev_y, curr_theta-prev_theta))
+
+        x_movemenents = [(m.delta_x, m.delta_y, m.delta_theta) for m in measured_movements]
+
         movement_penalty = 0.0
         for i in range(len(poses) - 1):
-            movement_penalty += ...
+            x_cal, y_cal, theta_cal = calc_movements_deltas[i]
+            x_mes, y_mes, theta_mes = x_movemenents[i]
+            movement_penalty += (x_cal - x_mes)**2 + (y_cal - y_mes) ** 2 + (theta_cal - theta_mes) ** 2
 
         movement_penalty *= odom_weight
 
@@ -98,11 +109,29 @@ class SLAM2DBackend:
         # 2. Observation Penalty (Sensor Error)
         # For each pose calculate expected distances and angles to all landmarks and compare to measurements
         ### TODO ###
+
+
         distance_penalty = 0
         angle_penalty = 0
         for measurement, pose in zip(measurements, poses):
-            distance_penalty += ...
-            angle_penalty += ...
+            expected_distances = []
+            expected_angles = []
+            for lm in landmarks:
+                dist = np.sqrt((lm[0] - pose[0]) ** 2 + (lm[1] - pose[1]) ** 2)
+                expected_distances.append(dist)
+                rel_x = lm[0] - pose[0]
+                rel_y = lm[1] - pose[1]
+                theta = math.atan2(rel_y, rel_x)
+                expected_angles.append(theta - pose[2])  # NOTE idk if i shuld subtract curr angle
+            
+            diff = np.array(expected_distances) - np.array(
+                [dist for dist in measurement.distances]
+            )
+            diff2 = np.array(expected_angles) - np.array(
+                [angle for angle in measurement.angles]
+            )
+            distance_penalty += np.sum(diff**2)
+            angle_penalty += np.sum(diff2**2)
 
         distance_penalty *= sensor_weight
         angle_penalty *= sensor_weight
