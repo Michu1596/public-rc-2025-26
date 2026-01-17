@@ -11,6 +11,7 @@ from pid import PID
 from plotting import plot_results
 # TODO: Additional imports if needed
 # END OF TODO
+from kalman_filter import KalmanFilter 
 
 # Simulation parameters
 resolution = (480, 640)  # (height, width) in pixels
@@ -125,6 +126,27 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
     kalman_position = np.zeros(3)
     current_marker = 0
     
+    aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+    parameters = cv2.aruco.DetectorParameters()
+    detector = cv2.aruco.ArucoDetector(aruco_dict, parameters)
+
+    # markers sets
+    markers = [
+        [0, 1, 2, 3],  # red gate
+        [4, 5, 6, 7],  # green gate
+        [8, 9, 10, 11] # blue gate
+    ]
+    current_gate = 0
+
+    # kalmans
+    process_var_translation = 0.1
+    measurement_var_translation = 0.1
+    kf_translation = KalmanFilter(process_var_translation, measurement_var_translation)
+
+    process_var_rotation = 0.1
+    measurement_var_rotation = 0.1
+    kf_rotation = KalmanFilter(process_var_rotation, measurement_var_rotation)
+    
     # END OF TODO
 
     task_label = f"rotated={'yes' if rotated_gates else 'no'}, wind={'yes' if wind else 'no'}, flight_mode={flight_mode}"
@@ -144,6 +166,9 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
     blue_gate_vel = np.zeros(3, dtype=float)
     # ---------------------------------------
 
+    # Create renderer once before the loop
+    renderer = mujoco.Renderer(model, resolution[0], resolution[1])
+
     try:
         for i in range(SIM_TIME):
             # ----- update smooth motion of all 3 gates -----
@@ -155,7 +180,6 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
             # -----------------------------------------------
             
             # Render camera frame
-            renderer = mujoco.Renderer(model, resolution[0], resolution[1])
             renderer.update_scene(data, camera="front_camera")
             camera_frame = renderer.render()
             camera_frame = np.asarray(camera_frame, dtype=np.uint8)
@@ -176,6 +200,76 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
             #print(f"true_position: {true_position.round(3)}")
 
             # TODO: Detect, estimate pose, apply Kalman filter
+            
+            # Detect markers
+            corners, ids, _ = detector.detectMarkers(camera_frame.copy())
+
+            left_upper_id = markers[current_gate][0]
+            right_upper_id = markers[current_gate][1]
+            right_lower_id = markers[current_gate][2]
+            left_lower_id = markers[current_gate][3]
+
+            corners_dict = {int(id_val): corner for id_val, corner in zip(ids.flatten(), corners)} if ids is not None else {}
+            
+            # get corners of the current gate
+            left_upper_gate_corner = corners_dict.get(left_upper_id)
+            right_upper_gate_corner = corners_dict.get(right_upper_id)
+            right_lower_gate_corner = corners_dict.get(right_lower_id)
+            left_lower_gate_corner = corners_dict.get(left_lower_id)
+
+            # update kalmans
+            kf_rotation.predict(model.opt.timestep)
+            kf_translation.predict(model.opt.timestep)
+
+            # estimate gate pose relative to the drone if all 4 markers are detected
+            if (left_upper_gate_corner is not None and right_upper_gate_corner is not None and
+                right_lower_gate_corner is not None and left_lower_gate_corner is not None):
+                
+                # Each corner from ArUco detector has shape (1, 4, 2) - 4 corners per marker
+                # We need the center of each marker for PnP
+                gate_corners_2d = np.array([
+                    left_upper_gate_corner[0].mean(axis=0),   # center of left upper marker
+                    right_upper_gate_corner[0].mean(axis=0),  # center of right upper marker
+                    right_lower_gate_corner[0].mean(axis=0),  # center of right lower marker
+                    left_lower_gate_corner[0].mean(axis=0)    # center of left lower marker
+                ], dtype=np.float32)
+
+                gate_size = 0.5  # size of the gate in meters
+                gate_corners_3d = np.array([
+                    [-gate_size / 2, gate_size / 2, 0],
+                    [gate_size / 2, gate_size / 2, 0],
+                    [gate_size / 2, -gate_size / 2, 0],
+                    [-gate_size / 2, -gate_size / 2, 0]
+                ], dtype=np.float32)
+
+                # print(f"gate_corners_2d: {gate_corners_2d.round(1)}")
+                # print(f"gate_corners_3d: {gate_corners_3d.round(3)}")
+                
+                # Solve PnP
+                success, rvec, tvec = cv2.solvePnP(
+                    gate_corners_3d,
+                    gate_corners_2d,
+                    K,
+                    dist_coeffs,
+                    flags=cv2.SOLVEPNP_IPPE_SQUARE
+                )
+                print(f"tvec: {tvec.flatten().round(3)}")
+                print(f"rvec: {rvec.flatten().round(3)}")
+
+                # update kalmans with measurement
+                if success:
+                    # get acceleration from drone simulator
+                    acc_x = data.sensordata[model.sensor("body_linacc").id]
+                    print(f"acc_x: {acc_x} m/s^2")
+
+                    pnp_position = tvec.flatten()
+                    kf_translation.update(tvec)
+                    kalman_position = kf_translation.x.flatten()
+                    kf_rotation.update(rvec)
+                    kalman_rotation = kf_rotation.x.flatten()
+                    print(f"pnp_position: {pnp_position.round(3)}")
+                    print(f"kalman_position: {kalman_position.round(3)}")
+                    print(f"kalman_rotation: {kalman_rotation.round(3)}")
 
             # END OF TODO
 
