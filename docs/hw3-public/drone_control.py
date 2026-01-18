@@ -349,25 +349,34 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
 
                     # update kalmans with measurement
                     
-                    # 1. Calculate Camera position in Gate Frame
-                    # tvec is Gate Origin in Camera Frame.
-                    # P_cam_in_gate = -R^T * tvec
-                    pos_cam_in_gate = R.T @ tvec
+                    # 1. Get vector from Camera to Gate in Camera Frame (OpenCV Convention: X-Right, Y-Down, Z-Forward)
+                    # tvec is Vector FROM Camera TO Gate Origin.
+                    tvec = tvec.flatten()
                     
-                    # 2. Adjust for Drone position relative to Camera
-                    # Drone body is at +0.16 in X relative to camera (backwards from camera view)
-                    # Camera is at -0.16 X, 0 Y, 0.02 Z relative to Drone.
-                    # So Drone = Cam + [0.16, 0, -0.02] (in Camera/Drone Frame orientation)
-                    # We need to rotate this offset into Gate Frame to add it.
-                    # Offset in Cam Frame:
-                    offset_cam = np.array([[0.16], [0], [-0.02]])
+                    # 2. Transform to Drone Body Frame (X-Forward, Y-Left, Z-Up)
+                    # Based on MuJoCo XML: Camera looks Forward.
+                    # Mapping OpenCV -> Drone:
+                    # Z (Forward) -> X (Forward)
+                    # X (Right)   -> -Y (Left)
+                    # Y (Down)    -> -Z (Up)
                     
-                    # Offset in Gate Frame: P_off_gate = R^T * P_off_cam
-                    offset_gate = R.T @ offset_cam
+                    pos_cam_rel_gate_drone_frame = np.array([-tvec[2], tvec[0], -tvec[1]]) # Vector FROM Camera TO Gate (in Drone Frame)
+
+                    # 3. Add Camera offset relative to Drone center
+                    # Drone Center to Camera is [-0.16, 0, 0.02] (from x2.xml)
+                    # Vector Drone-to-Gate = Vector Drone-to-Camera + Vector Camera-to-Gate
                     
-                    # Drone Position in Gate Frame
-                    pnp_position = pos_cam_in_gate - offset_gate
-                    pnp_position = pnp_position.flatten()
+                    vec_drone_to_cam = np.array([-0.16, 0.0, 0.02])
+                    vec_drone_to_gate_drone_frame = vec_drone_to_cam + pos_cam_rel_gate_drone_frame
+                    
+                    # 4. Transform to World Frame (relative to Drone)
+                    # We need to rotate this vector by the drone's current orientation (from Kalman Filter)
+                    # kf_rotation state is [roll, pitch, yaw] in degrees
+                    # This vector represents (Gate_Position_World - Drone_Position_World) rotated into world axes
+                    rpy_rad = np.radians(kf_rotation.x.flatten()[:3])
+                    R_drone_to_world = Rotation.from_euler('xyz', rpy_rad).as_matrix()
+                    
+                    pnp_position = R_drone_to_world @ vec_drone_to_gate_drone_frame
                     
                     measurement_pos = np.vstack((pnp_position.reshape(3,1), acc.reshape(3,1)))
                     kf_translation.update(measurement_pos)
