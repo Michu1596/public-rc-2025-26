@@ -142,7 +142,7 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
 
     # kalmans
     process_var_translation = 0.1
-    measurement_var_translation = 0.1
+    measurement_var_translation = 0.5
     kf_translation = KalmanFilter(process_var_translation, measurement_var_translation, use_acceleration=True)
 
     process_var_rotation = 0.1
@@ -280,29 +280,47 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
             img_points = []
 
             # Map index in the list 0..3 to 3D position (x, y, z)
-            # Based on scene.xml:
-            # - Gate body is at (0,0,0) in Gate Frame.
-            # - Markers 0-3 are on the Red Gate.
-            # - Marker 0 (top-right from drone view?) is at Y=+0.6, Z=+0.65.
-            # - Marker geoms are boxes 0.2x0.2x0.2 centered at X=0.01.
-            # - Visual marker texture is on the +X face.
-            # - Surface X = 0.01 + 0.1 = 0.11.
-            local_positions = [
-                [0.11, 0.6, 0.65],   # 0
-                [0.11, -0.6, 0.65],  # 1
-                [0.11, -0.6, -0.65], # 2
-                [0.11, 0.6, -0.65]   # 3
+            # Centers at x=0.01 relative to gate body, markers on +X face means surface at x=0.11
+            center_positions = [
+                np.array([0.11, 0.6, 0.65]),   # 0
+                np.array([0.11, -0.6, 0.65]),  # 1
+                np.array([0.11, -0.6, -0.65]), # 2
+                np.array([0.11, 0.6, -0.65])   # 3
             ]
+            
+            # Marker half-size
+            h = 0.1
+            
+            # Define 4 corners relative to the center offset for each marker
+            # Based on Camera orientation (X_cam=Y_w, Y_cam=Z_w):
+            # Image Right (+X_cam) is World +Y.
+            # Image Down (+Y_cam) is World +Z.
+            # ArUco order: TL, TR, BR, BL.
+            # TL (Left, Top): Left=-Y, Top=-Z.  -> (-h, -h)
+            # TR (Right, Top): Right=+Y, Top=-Z. -> (+h, -h)
+            # BR (Right, Bottom): Right=+Y, Bottom=+Z. -> (+h, +h)
+            # BL (Left, Bottom): Left=-Y, Bottom=+Z. -> (-h, +h)
+            marker_offsets = np.array([
+                [0, -h, -h], # TL
+                [0,  h, -h], # TR
+                [0,  h,  h], # BR
+                [0, -h,  h]  # BL
+            ])
 
             for idx, m_id in enumerate(gate_ids):
                 if m_id in corners_dict:
-                    # Append center of the marker
-                    center = corners_dict[m_id][0].mean(axis=0)
-                    img_points.append(center)
-                    obj_points.append(local_positions[idx])
+                    # Get all 4 corners for this marker (1, 4, 2) -> (4, 2)
+                    corners_2d = corners_dict[m_id][0]
+                    img_points.extend(corners_2d)
+                    
+                    # Generate 4 corresponding 3D points
+                    center = center_positions[idx]
+                    corners_3d = center + marker_offsets
+                    obj_points.extend(corners_3d)
             
             pnp_valid = False
-            if len(img_points) >= 4:
+            # Needs at least 1 marker (4 points) to solve
+            if len(img_points) >= 16:
                 gate_local_corners = np.array(obj_points, dtype=np.float32)
                 gate_corners_2d = np.array(img_points, dtype=np.float32)
                 
@@ -334,7 +352,7 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
                     # 1. Calculate Camera position in Gate Frame
                     # tvec is Gate Origin in Camera Frame.
                     # P_cam_in_gate = -R^T * tvec
-                    pos_cam_in_gate = -R.T @ tvec
+                    pos_cam_in_gate = R.T @ tvec
                     
                     # 2. Adjust for Drone position relative to Camera
                     # Drone body is at +0.16 in X relative to camera (backwards from camera view)
@@ -342,14 +360,14 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
                     # So Drone = Cam + [0.16, 0, -0.02] (in Camera/Drone Frame orientation)
                     # We need to rotate this offset into Gate Frame to add it.
                     # Offset in Cam Frame:
-                    offset_cam = np.array([[0.20], [0], [-0.02]])
+                    offset_cam = np.array([[0.16], [0], [-0.02]])
                     
                     # Offset in Gate Frame: P_off_gate = R^T * P_off_cam
                     offset_gate = R.T @ offset_cam
                     
                     # Drone Position in Gate Frame
-                    pnp_position = pos_cam_in_gate + offset_gate
-                    pnp_position = - pnp_position.flatten()
+                    pnp_position = pos_cam_in_gate - offset_gate
+                    pnp_position = pnp_position.flatten()
                     
                     measurement_pos = np.vstack((pnp_position.reshape(3,1), acc.reshape(3,1)))
                     kf_translation.update(measurement_pos)
