@@ -141,31 +141,31 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
     current_gate = 0
 
     # kalmans
-    process_var_translation = 1.5
-    measurement_var_translation = 1.5
+    process_var_translation = 1.5 # Trust the process
+    measurement_var_translation = 2.5
     kf_translation = KalmanFilter(process_var_translation, measurement_var_translation, use_acceleration=True)
 
     process_var_rotation = 1.5
-    measurement_var_rotation = 1.5
-    kf_rotation = KalmanFilter(process_var_rotation, measurement_var_rotation, use_acceleration=False)
+    measurement_var_rotation = 2.5
+    kf_rotation = KalmanFilter(process_var_rotation, measurement_var_rotation, use_acceleration=False) # This filter serves no purpose other than demonstration
     
     # pids
 
-    pid_x_thrust = PID(
-        gain_prop=10,
-        gain_int=0.5,
-        gain_der=20,
-        sensor_period=model.opt.timestep,
-        output_limits=(-15, 15),
-    )
+    # pid_x_thrust = PID(
+    #     gain_prop=10,
+    #     gain_int=0.5,
+    #     gain_der=20,
+    #     sensor_period=model.opt.timestep,
+    #     output_limits=(-15, 15),
+    # )
 
-    pid_y_thrust = PID(
-        gain_prop=10,
-        gain_int=0.5,
-        gain_der=20,
-        sensor_period=model.opt.timestep,
-        output_limits=(-15, 15),
-    )
+    # pid_y_thrust = PID(
+    #     gain_prop=10,
+    #     gain_int=0.5,
+    #     gain_der=20,
+    #     sensor_period=model.opt.timestep,
+    #     output_limits=(-15, 15),
+    # )
 
     # pid_roll = PID(
     #     gain_prop=0.1,
@@ -193,9 +193,9 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
 
     # prev x
     prev_state_position = np.zeros(9)
-    prev_state_rotation = np.zeros(9)
+    # prev_state_rotation = np.zeros(9)
 
-    # ids
+    # sensors ids
     linacc_id = model.sensor("body_linacc").id
     gyro_id = model.sensor("body_gyro").id
 
@@ -239,7 +239,7 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
             camera_frame = np.asarray(camera_frame, dtype=np.uint8)
 
             # Get current orientation
-            current_orien, _ = drone_simulator.orientation_sensor() # can't use that!
+            current_orien, _ = drone_simulator.orientation_sensor()
 
             drone_position = drone_simulator.position_sensor()[0]
             if current_marker == 0:
@@ -251,7 +251,7 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
 
             # You can use true_position as ground truth for debugging purposes
             true_position = gate_position - drone_position
-            print(f"true_position: {true_position.round(3)}")
+            # print(f"true_position: {true_position.round(3)}")
 
             # TODO: Detect, estimate pose, apply Kalman filter
             
@@ -261,7 +261,7 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
             
             # update kalmans
             prev_state_position = kf_translation.x.copy().flatten()
-            prev_state_rotation = kf_rotation.x.copy().flatten()
+            # prev_state_rotation = kf_rotation.x.copy().flatten()
 
             kf_rotation.predict(dt)
             kf_translation.predict(dt)
@@ -301,7 +301,7 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
                     obj_points.extend(corners_3d)
             
             pnp_valid = False
-            # Needs at least 1 marker (4 points) to solve
+            # I tried to use only subset of points, but it didn't work well, better approach is to skip PnP when not enough points
             if len(img_points) >= 16:
                 gate_local_corners = np.array(obj_points, dtype=np.float32)
                 gate_corners_2d = np.array(img_points, dtype=np.float32)
@@ -318,58 +318,28 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
                 
                 pnp_rpy_deg = None
                 if success:
-                    pnp_valid = True
-                    
-                    # Transform gate-local corners to world using PnP result (for visualization/debug only)
-                    # We rely only on what update_gate_position gives (which we can't see but visualization uses)
-                    # Note: PnP assumes camera frame. Visualization needs World Frame.
-                    # This part is just for print debug.
-                    
+                    pnp_valid = True                                       
                     # get acceleration from drone simulator
                     acc = data.sensordata[linacc_id:linacc_id+3]  # [ax, ay, az]
                     print(f"acceleration: {acc} m/s^2")
 
-                    # update kalmans with measurement
-                    
-                    # 1. Get vector from Camera to Gate in Camera Frame (OpenCV Convention: X-Right, Y-Down, Z-Forward)
-                    # tvec is Vector FROM Camera TO Gate Origin.
                     tvec = tvec.flatten()
-                    
-                    # 2. Transform to Drone Body Frame (X-Forward, Y-Left, Z-Up)
-                    # Based on MuJoCo XML: Camera looks Forward.
-                    # Mapping OpenCV -> Drone:
-                    # Z (Forward) -> X (Forward)
-                    # X (Right)   -> -Y (Left)
-                    # Y (Down)    -> -Z (Up)
-                    
+
                     pos_cam_rel_gate_drone_frame = np.array([ -tvec[2], tvec[0], -tvec[1]]) # Vector FROM Camera TO Gate (in Drone Frame)
 
                     # 3. Add Camera offset relative to Drone center
-                    # Drone Center to Camera is [-0.16, 0, 0.02] (from x2.xml)
-                    # Vector Drone-to-Gate = Vector Drone-to-Camera + Vector Camera-to-Gate
-                    
                     vec_drone_to_cam = np.array([-0.16, 0.0, 0.02])
-                    vec_drone_to_gate_drone_frame = vec_drone_to_cam + pos_cam_rel_gate_drone_frame
+                    pnp_position = vec_drone_to_cam + pos_cam_rel_gate_drone_frame
                     
-                    # 4. Transform to World Frame (relative to Drone)
-                    # We need to rotate this vector by the drone's current orientation (from Kalman Filter)
-                    # kf_rotation state is [roll, pitch, yaw] in degrees
-                    # This vector represents (Gate_Position_World - Drone_Position_World) rotated into world axes
-                    # rpy_rad = np.radians(kf_rotation.x.flatten()[:3])
-                    # R_drone_to_world = Rotation.from_euler('xyz', rpy_rad).as_matrix()
-                    # print(f"R_drone_to_world: \n{R_drone_to_world.round(3)}")
-                    
-                    pnp_position =  vec_drone_to_gate_drone_frame
                     print(f"pnp_position (Drone Frame): {pnp_position.round(3)}")
 
                     # Update Kalman Filter with position measurement 
                     measurement_pos = np.vstack((pnp_position.reshape(3,1), acc.reshape(3,1)))
+
                     kf_translation.update(measurement_pos)
                     kalman_position = kf_translation.x.flatten()[:3]
                     
                     # Calculate drone rotation in gate frame using rvec directly
-                    # rvec is the rotation vector from gate to camera
-                    # Convert to rotation matrix and then to RPY
                     R_gate_to_cam, _ = cv2.Rodrigues(rvec)
                     
                     # Transform to drone frame
@@ -402,7 +372,7 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
 
             # END OF TODO
 
-            # make this fly
+            # TODO make it fly
             # we want this drone to be in 0,0,0 in gate frame
             desired_position = np.array([-2.0, 0.0, -0.2])
 
