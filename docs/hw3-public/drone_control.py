@@ -247,7 +247,7 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
             camera_frame = np.asarray(camera_frame, dtype=np.uint8)
 
             # Get current orientation
-            current_orien, _ = drone_simulator.orientation_sensor()
+            # current_orien, _ = drone_simulator.orientation_sensor() can't use that!
 
             drone_position = drone_simulator.position_sensor()[0]
             if current_marker == 0:
@@ -265,20 +265,8 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
             
             # Detect markers
             corners, ids, _ = detector.detectMarkers(camera_frame.copy())
-
-            id0 = markers[current_gate][0]
-            id1 = markers[current_gate][1]
-            id2 = markers[current_gate][2]
-            id3 = markers[current_gate][3]
-
             corners_dict = {int(id_val): corner for id_val, corner in zip(ids.flatten(), corners)} if ids is not None else {}
             
-            # get corners of the current gate
-            marker0 = corners_dict.get(id0)
-            marker1 = corners_dict.get(id1)
-            marker2 = corners_dict.get(id2)
-            marker3 = corners_dict.get(id3)
-
             # update kalmans
             prev_state_position = kf_translation.x.copy().flatten()
             prev_state_rotation = kf_rotation.x.copy().flatten()
@@ -286,67 +274,90 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
             kf_rotation.predict(dt)
             kf_translation.predict(dt)
 
-            # estimate gate pose relative to the drone if all 4 markers are detected
-            if (marker0 is not None and marker1 is not None and
-                marker2 is not None and marker3 is not None):
-                
-                # Each corner from ArUco detector has shape (1, 4, 2) - 4 corners per marker
-                # We need the center of each marker for PnP
-                gate_corners_2d = np.array([
-                    marker0[0].mean(axis=0),   # center of left upper marker
-                    marker1[0].mean(axis=0),  # center of right upper marker
-                    marker2[0].mean(axis=0),  # center of right lower marker
-                    marker3[0].mean(axis=0)    # center of left lower marker
-                ], dtype=np.float32)
+            # estimate gate pose relative to the drone if sufficient markers are detected
+            gate_ids = markers[current_gate]
+            obj_points = []
+            img_points = []
 
-                # Gate-local marker positions
-                gate_local_corners = np.array([
-                    [0.01, 0.6, 0.65],      # id0
-                    [0.01, -0.6, 0.65],     # id1
-                    [0.01, -0.6, -0.65],    # id2
-                    [0.01, 0.6, -0.65]      # id3
-                ], dtype=np.float32)
+            # Map index in the list 0..3 to 3D position (x, y, z)
+            # Based on scene.xml:
+            # - Gate body is at (0,0,0) in Gate Frame.
+            # - Markers 0-3 are on the Red Gate.
+            # - Marker 0 (top-right from drone view?) is at Y=+0.6, Z=+0.65.
+            # - Marker geoms are boxes 0.2x0.2x0.2 centered at X=0.01.
+            # - Visual marker texture is on the +X face.
+            # - Surface X = 0.01 + 0.1 = 0.11.
+            local_positions = [
+                [0.11, 0.6, 0.65],   # 0
+                [0.11, -0.6, 0.65],  # 1
+                [0.11, -0.6, -0.65], # 2
+                [0.11, 0.6, -0.65]   # 3
+            ]
+
+            for idx, m_id in enumerate(gate_ids):
+                if m_id in corners_dict:
+                    # Append center of the marker
+                    center = corners_dict[m_id][0].mean(axis=0)
+                    img_points.append(center)
+                    obj_points.append(local_positions[idx])
+            
+            pnp_valid = False
+            if len(img_points) >= 4:
+                gate_local_corners = np.array(obj_points, dtype=np.float32)
+                gate_corners_2d = np.array(img_points, dtype=np.float32)
                 
                 # Solve PnP
+                # Use ITERATIVE for general 3D points
                 success, rvec, tvec = cv2.solvePnP(
                     gate_local_corners,
                     gate_corners_2d,
                     K,
                     dist_coeffs,
-                    flags=cv2.SOLVEPNP_IPPE_SQUARE
+                    flags=cv2.SOLVEPNP_ITERATIVE
                 )
-                print(f"orginal tvec: {tvec.flatten().round(3)}")
-
+                
                 if success:
+                    pnp_valid = True
                     # Convert rvec to rotation matrix
                     R, _ = cv2.Rodrigues(rvec)
                     
-                    # Transform gate-local corners to world using PnP result
-                    gate_corners_world = gate_position + (R @ gate_local_corners.T).T
+                    # Transform gate-local corners to world using PnP result (for visualization/debug only)
+                    # We rely only on what update_gate_position gives (which we can't see but visualization uses)
+                    # Note: PnP assumes camera frame. Visualization needs World Frame.
+                    # This part is just for print debug.
                     
-                    # Use world coordinates for PnP - this way PnP estimates drone position
-                    gate_corners_3d = gate_corners_world.astype(np.float32)
-                    
-                    print(f"gate_corners_2d: {gate_corners_2d.round(1)}")
-                    print(f"gate_corners_3d: {gate_corners_3d.round(3)}")
-                    
-                    print(f"tvec: {tvec.flatten().round(3)}")
-                    print(f"rvec: {rvec.flatten().round(3)}")
                     # get acceleration from drone simulator
-                    # Get the sensor starting indices
-
-                    # Access all 3 values for each sensor
                     acc = data.sensordata[linacc_id:linacc_id+3]  # [ax, ay, az]
 
-                    print(f"acc: {acc} m/s^2")
-
                     # update kalmans with measurement
-                    pnp_position = -R.T @ tvec
-                    pnp_position = pnp_position.flatten()
+                    
+                    # 1. Calculate Camera position in Gate Frame
+                    # tvec is Gate Origin in Camera Frame.
+                    # P_cam_in_gate = -R^T * tvec
+                    pos_cam_in_gate = -R.T @ tvec
+                    
+                    # 2. Adjust for Drone position relative to Camera
+                    # Drone body is at +0.16 in X relative to camera (backwards from camera view)
+                    # Camera is at -0.16 X, 0 Y, 0.02 Z relative to Drone.
+                    # So Drone = Cam + [0.16, 0, -0.02] (in Camera/Drone Frame orientation)
+                    # We need to rotate this offset into Gate Frame to add it.
+                    # Offset in Cam Frame:
+                    offset_cam = np.array([[0.20], [0], [-0.02]])
+                    
+                    # Offset in Gate Frame: P_off_gate = R^T * P_off_cam
+                    offset_gate = R.T @ offset_cam
+                    
+                    # Drone Position in Gate Frame
+                    pnp_position = pos_cam_in_gate + offset_gate
+                    pnp_position = - pnp_position.flatten()
+                    
                     measurement_pos = np.vstack((pnp_position.reshape(3,1), acc.reshape(3,1)))
-                    print(f"measurement_pos: {measurement_pos.round(3)}")
                     kf_translation.update(measurement_pos)
                     kalman_position = kf_translation.x.flatten()[:3]
+
+            if not pnp_valid:
+                # If PnP failed, we just predict (done above) and maybe rely on IMU
+                pass
 
 
             gyro = data.sensordata[gyro_id:gyro_id+3]    # [roll_rate, pitch_rate, yaw_rate]
