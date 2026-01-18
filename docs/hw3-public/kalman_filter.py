@@ -12,9 +12,10 @@ class KalmanFilter:
         # Option to measure position+velocity or position+acceleration
         if use_acceleration == False:  # position_velocity
             # Measures: position (0,1,2) and velocity (3,4,5)
-            self.H = np.zeros((3, 9))
-            self.H[0:3, 3:6] = np.eye(3)  # velocity
-            self.R = np.eye(3) * measurement_var
+            self.H = np.zeros((6, 9))
+            self.H[0:3, 0:3] = np.eye(3)  # position
+            self.H[3:6, 3:6] = np.eye(3)  # velocity
+            self.R = np.eye(6) * measurement_var
         else:  # position_acceleration (default)
             # Measures: position (0,1,2) and acceleration (6,7,8)
             self.H = np.zeros((6, 9))
