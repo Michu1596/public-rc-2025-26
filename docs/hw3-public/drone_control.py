@@ -10,6 +10,7 @@ from drone_simulator import DroneSimulator
 from pid import PID
 from plotting import plot_results
 # TODO: Additional imports if needed
+from scipy.spatial.transform import Rotation
 # END OF TODO
 from kalman_filter import KalmanFilter 
 
@@ -114,6 +115,7 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
     K = camera_intrinsics_from_fovy(fovy_deg, resolution[0], resolution[1])
     dist_coeffs = np.zeros(5)
     desired_thrust = 3.2496
+    thrust = desired_thrust
     roll_thrust, pitch_thrust, yaw_thrust = 0.0, 0.0, 0.0
 
     SIM_TIME = 500 if flight_mode == "hover" else 5000
@@ -141,12 +143,72 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
     # kalmans
     process_var_translation = 0.1
     measurement_var_translation = 0.1
-    kf_translation = KalmanFilter(process_var_translation, measurement_var_translation)
+    kf_translation = KalmanFilter(process_var_translation, measurement_var_translation, use_acceleration=True)
 
     process_var_rotation = 0.1
     measurement_var_rotation = 0.1
-    kf_rotation = KalmanFilter(process_var_rotation, measurement_var_rotation)
+    kf_rotation = KalmanFilter(process_var_rotation, measurement_var_rotation, use_acceleration=False)
     
+    # pids
+
+    pid_x_thrust = PID(
+        gain_prop=10,
+        gain_int=0.5,
+        gain_der=20,
+        sensor_period=model.opt.timestep,
+        output_limits=(-15, 15),
+    )
+
+    pid_y_thrust = PID(
+        gain_prop=10,
+        gain_int=0.5,
+        gain_der=20,
+        sensor_period=model.opt.timestep,
+        output_limits=(-15, 15),
+    )
+
+    pid_roll = PID(
+        gain_prop=0.1,
+        gain_int=0.0,
+        gain_der=0.06,
+        sensor_period=model.opt.timestep,
+        output_limits=(-100, 100),
+    )
+
+    pid_pitch = PID(
+        gain_prop=0.1,
+        gain_int=0.0,
+        gain_der=0.06,
+        sensor_period=model.opt.timestep,
+        output_limits=(-100, 100),
+    )
+
+    pid_yaw = PID(
+        gain_prop=0.1,
+        gain_int=0.1,
+        gain_der=0.1,
+        sensor_period=model.opt.timestep,
+        output_limits=(-100, 100),
+    )
+
+    pid_z = PID(
+        gain_prop=100.0,
+        gain_int=20,
+        gain_der=50.0,
+        sensor_period=model.opt.timestep,
+        output_limits=(-100, 100),
+    )
+
+    # prev x
+    prev_state_position = np.zeros(9)
+    prev_state_rotation = np.zeros(9)
+
+    # ids
+    linacc_id = model.sensor("body_linacc").id
+    gyro_id = model.sensor("body_gyro").id
+
+    # dt
+    dt = model.opt.timestep
     # END OF TODO
 
     task_label = f"rotated={'yes' if rotated_gates else 'no'}, wind={'yes' if wind else 'no'}, flight_mode={flight_mode}"
@@ -197,79 +259,161 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
 
             # You can use true_position as ground truth for debugging purposes
             true_position = gate_position - drone_position
-            #print(f"true_position: {true_position.round(3)}")
+            print(f"true_position: {true_position.round(3)}")
 
             # TODO: Detect, estimate pose, apply Kalman filter
             
             # Detect markers
             corners, ids, _ = detector.detectMarkers(camera_frame.copy())
 
-            left_upper_id = markers[current_gate][0]
-            right_upper_id = markers[current_gate][1]
-            right_lower_id = markers[current_gate][2]
-            left_lower_id = markers[current_gate][3]
+            id0 = markers[current_gate][0]
+            id1 = markers[current_gate][1]
+            id2 = markers[current_gate][2]
+            id3 = markers[current_gate][3]
 
             corners_dict = {int(id_val): corner for id_val, corner in zip(ids.flatten(), corners)} if ids is not None else {}
             
             # get corners of the current gate
-            left_upper_gate_corner = corners_dict.get(left_upper_id)
-            right_upper_gate_corner = corners_dict.get(right_upper_id)
-            right_lower_gate_corner = corners_dict.get(right_lower_id)
-            left_lower_gate_corner = corners_dict.get(left_lower_id)
+            marker0 = corners_dict.get(id0)
+            marker1 = corners_dict.get(id1)
+            marker2 = corners_dict.get(id2)
+            marker3 = corners_dict.get(id3)
 
             # update kalmans
-            kf_rotation.predict(model.opt.timestep)
-            kf_translation.predict(model.opt.timestep)
+            prev_state_position = kf_translation.x.copy().flatten()
+            prev_state_rotation = kf_rotation.x.copy().flatten()
+
+            kf_rotation.predict(dt)
+            kf_translation.predict(dt)
 
             # estimate gate pose relative to the drone if all 4 markers are detected
-            if (left_upper_gate_corner is not None and right_upper_gate_corner is not None and
-                right_lower_gate_corner is not None and left_lower_gate_corner is not None):
+            if (marker0 is not None and marker1 is not None and
+                marker2 is not None and marker3 is not None):
                 
                 # Each corner from ArUco detector has shape (1, 4, 2) - 4 corners per marker
                 # We need the center of each marker for PnP
                 gate_corners_2d = np.array([
-                    left_upper_gate_corner[0].mean(axis=0),   # center of left upper marker
-                    right_upper_gate_corner[0].mean(axis=0),  # center of right upper marker
-                    right_lower_gate_corner[0].mean(axis=0),  # center of right lower marker
-                    left_lower_gate_corner[0].mean(axis=0)    # center of left lower marker
+                    marker0[0].mean(axis=0),   # center of left upper marker
+                    marker1[0].mean(axis=0),  # center of right upper marker
+                    marker2[0].mean(axis=0),  # center of right lower marker
+                    marker3[0].mean(axis=0)    # center of left lower marker
                 ], dtype=np.float32)
 
-                gate_size = 0.5  # size of the gate in meters
-                gate_corners_3d = np.array([
-                    [-gate_size / 2, gate_size / 2, 0],
-                    [gate_size / 2, gate_size / 2, 0],
-                    [gate_size / 2, -gate_size / 2, 0],
-                    [-gate_size / 2, -gate_size / 2, 0]
+                # Gate-local marker positions
+                gate_local_corners = np.array([
+                    [0.01, 0.6, 0.65],      # id0
+                    [0.01, -0.6, 0.65],     # id1
+                    [0.01, -0.6, -0.65],    # id2
+                    [0.01, 0.6, -0.65]      # id3
                 ], dtype=np.float32)
-
-                # print(f"gate_corners_2d: {gate_corners_2d.round(1)}")
-                # print(f"gate_corners_3d: {gate_corners_3d.round(3)}")
                 
                 # Solve PnP
                 success, rvec, tvec = cv2.solvePnP(
-                    gate_corners_3d,
+                    gate_local_corners,
                     gate_corners_2d,
                     K,
                     dist_coeffs,
                     flags=cv2.SOLVEPNP_IPPE_SQUARE
                 )
-                print(f"tvec: {tvec.flatten().round(3)}")
-                print(f"rvec: {rvec.flatten().round(3)}")
+                print(f"orginal tvec: {tvec.flatten().round(3)}")
 
-                # update kalmans with measurement
                 if success:
+                    # Convert rvec to rotation matrix
+                    R, _ = cv2.Rodrigues(rvec)
+                    
+                    # Transform gate-local corners to world using PnP result
+                    gate_corners_world = gate_position + (R @ gate_local_corners.T).T
+                    
+                    # Use world coordinates for PnP - this way PnP estimates drone position
+                    gate_corners_3d = gate_corners_world.astype(np.float32)
+                    
+                    print(f"gate_corners_2d: {gate_corners_2d.round(1)}")
+                    print(f"gate_corners_3d: {gate_corners_3d.round(3)}")
+                    
+                    print(f"tvec: {tvec.flatten().round(3)}")
+                    print(f"rvec: {rvec.flatten().round(3)}")
                     # get acceleration from drone simulator
-                    acc_x = data.sensordata[model.sensor("body_linacc").id]
-                    print(f"acc_x: {acc_x} m/s^2")
+                    # Get the sensor starting indices
 
-                    pnp_position = tvec.flatten()
-                    kf_translation.update(tvec)
-                    kalman_position = kf_translation.x.flatten()
-                    kf_rotation.update(rvec)
-                    kalman_rotation = kf_rotation.x.flatten()
-                    print(f"pnp_position: {pnp_position.round(3)}")
-                    print(f"kalman_position: {kalman_position.round(3)}")
-                    print(f"kalman_rotation: {kalman_rotation.round(3)}")
+                    # Access all 3 values for each sensor
+                    acc = data.sensordata[linacc_id:linacc_id+3]  # [ax, ay, az]
+
+                    print(f"acc: {acc} m/s^2")
+
+                    # update kalmans with measurement
+                    pnp_position = -R.T @ tvec
+                    pnp_position = pnp_position.flatten()
+                    measurement_pos = np.vstack((pnp_position.reshape(3,1), acc.reshape(3,1)))
+                    print(f"measurement_pos: {measurement_pos.round(3)}")
+                    kf_translation.update(measurement_pos)
+                    kalman_position = kf_translation.x.flatten()[:3]
+
+
+            gyro = data.sensordata[gyro_id:gyro_id+3]    # [roll_rate, pitch_rate, yaw_rate]
+            print(f"gyro: {gyro} rad/s")
+            measurement_rot = np.array(gyro).reshape(3,1)
+            print(f"measurement_rot: {measurement_rot.round(3)}")
+            kf_rotation.update(measurement_rot)
+            kalman_rotation = kf_rotation.x.flatten()[:3]
+
+            print(f"pnp_position: {pnp_position.round(3)}")
+            print(f"kalman_position: {kf_translation.x.flatten().round(3)}")
+            print(f"kalman_rotation: {kf_rotation.x.flatten().round(3)}")
+
+            # END OF TODO
+
+            # TODO make this fly
+            # we want this drone to be in 0,0,0 in gate frame
+            desired_position = np.array([0.0, 0.0,0.2])
+            target_x = desired_position[0]
+            target_y = desired_position[1]
+
+            prev_x = prev_state_position[0]
+            current_x = kalman_position[0]
+
+            prev_y = prev_state_position[1]
+            current_y = kalman_position[1]
+
+            prev_z = prev_state_position[2]
+            current_z = kalman_position[2]
+
+            prev_roll = prev_state_rotation[0]
+            current_roll = kalman_rotation[0]
+
+            prev_pitch = prev_state_rotation[1]
+            current_pitch = kalman_rotation[1]
+
+            prev_yaw = prev_state_rotation[2]
+            current_yaw = kalman_rotation[2]
+
+            desired_x_thrust = pid_x_thrust.output_signal(target_x, [current_x, prev_x])
+            desired_y_thrust = pid_y_thrust.output_signal(target_y, [current_y, prev_y])
+
+            # based on current yaw, convert desired x and y thrust to desired roll and pitch
+
+            current_yaw_rad = math.radians(current_yaw)
+            desired_roll = (
+                desired_x_thrust * math.sin(current_yaw_rad)
+                - desired_y_thrust * math.cos(current_yaw_rad)
+            )
+            desired_pitch = (
+                + desired_x_thrust * math.cos(current_yaw_rad)
+                + desired_y_thrust * math.sin(current_yaw_rad)
+            )
+
+            # roll_thrust = - pid_roll.output_signal(
+            #     desired_roll, [current_roll, prev_roll]
+            # )
+            # pitch_thrust = - pid_pitch.output_signal(
+            #     desired_pitch, [current_pitch, prev_pitch]
+            # )
+
+            # thrust = pid_z.output_signal(
+            #     commanded_variable=desired_position[2],
+            #     sensor_readings=[current_z, prev_z],
+            # )
+            print(f"thrust: {thrust} thrust roll : {roll_thrust} pitch: {pitch_thrust} current z: {current_z.round(3)} prev z: {prev_z.round(3)}")
+
 
             # END OF TODO
 
@@ -281,7 +425,7 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
 
             # Make a simulation step
             drone_simulator.sim_step(
-                desired_thrust, roll_thrust,
+                thrust, roll_thrust,
                 pitch_thrust, yaw_thrust
             )
 

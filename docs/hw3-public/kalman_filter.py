@@ -1,7 +1,7 @@
 import numpy as np
 
 class KalmanFilter:
-    def __init__(self, process_var, measurement_var):
+    def __init__(self, process_var, measurement_var, use_acceleration = False):
         # dt: time interval
         # process_var: process variance, represents uncertainty in the model
         # measurement_var: measurement variance, represents measurement noise
@@ -9,13 +9,21 @@ class KalmanFilter:
         # Measurement Matrix
         ## TODO ##
         # Set the measurement matrix H
-        self.H = np.eye(3,9)
+        # Option to measure position+velocity or position+acceleration
+        if use_acceleration == False:  # position_velocity
+            # Measures: position (0,1,2) and velocity (3,4,5)
+            self.H = np.zeros((3, 9))
+            self.H[0:3, 3:6] = np.eye(3)  # velocity
+            self.R = np.eye(3) * measurement_var
+        else:  # position_acceleration (default)
+            # Measures: position (0,1,2) and acceleration (6,7,8)
+            self.H = np.zeros((6, 9))
+            self.H[0:3, 0:3] = np.eye(3)  # position
+            self.H[3:6, 6:9] = np.eye(3)  # acceleration
+            self.R = np.eye(6) * measurement_var
 
         # Process Covariance Matrix
         self.Q = np.eye(9) * process_var
-
-        # Measurement Covariance Matrix
-        self.R = np.eye(3) * measurement_var
 
         # Initial State Covariance Matrix
         self.P = np.eye(9)
@@ -37,7 +45,6 @@ class KalmanFilter:
                       [0,0,0,0,0,0,0,0,1]])
         # print(f"x pre predict: {self.x}")
         self.x = A @ self.x
-        print(f"x {self.x} dt : {dt}")
         assert self.x.shape == (9,1), "bad shape"
         # print(f"x po predict: {self.x}")
         self.P = A @ self.P @ A.T + self.Q
