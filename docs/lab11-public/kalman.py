@@ -15,7 +15,7 @@ class KalmanFilter:
         # Measurement Matrix
         ## TODO ##
         # Set the measurement matrix H
-        self.H = ...
+        self.H = np.eye(2,4)
 
         # Process Covariance Matrix
         self.Q = np.eye(4) * process_var
@@ -27,23 +27,30 @@ class KalmanFilter:
         self.P = np.eye(4)
 
         # Initial State
-        self.x = np.zeros((4, 1))
+        self.x = np.zeros((4, 1)) # [x,y,x_vel, y_vel]
 
     def predict(self, dt):
         ### TODO ###
         # State Transition Matrix
-        A = ...
-        self.x = ...
-        self.P = ...
+        A = np.array([[1,0,dt,0],[0,1,0,dt],[0,0,1,0],[0,0,0,1]])
+        # print(f"x pre predict: {self.x}")
+        self.x = A @ self.x
+        print(f"x {self.x} dt : {dt}")
+        assert self.x.shape == (4,1), "bad shape"
+        # print(f"x po predict: {self.x}")
+        self.P = A @ self.P @ A.T + self.Q
         ###
 
-    def update(self, measurement):
+    def update(self, measurement : np.array):
         # Update the state with the new measurement
         ### TODO ###
-        ...
-        self.x = ...
-        self.P = ...
-        pass
+        y = measurement - self.H @ self.x
+        S = self.H @ self.P @ self.H.T + self.R
+        K = self.P @ self.H.T @ np.linalg.inv(S)
+
+        self.x = self.x + K @ y
+        assert self.x.shape == (4,1), "bad shape"
+        self.P = (np.eye(4) - K @ self.H) @ self.P
         ### ###
 
 
@@ -67,7 +74,8 @@ class ClickReader:
             new_time = datetime.datetime.now()
             ### TODO ###
             # Predict the next state
-
+            dt = new_time - self.cur_time
+            kf.predict(dt.microseconds / 1e6)
             ###
             self.cur_time = new_time
 
@@ -75,7 +83,7 @@ class ClickReader:
 
             ### TODO ###
             # Update the state with the new measurement
-
+            kf.update(np.array([[x],[y]]))
             ###
             print(f"Updated State: {kf.x}")
 
@@ -88,13 +96,15 @@ class ClickReader:
 
             ### TODO ###
             # Predict the next state
-
+            dt = new_time - self.cur_time
+            kf.predict(dt.microseconds / 1e6)
             self.cur_time = new_time
 
             ### TODO ###
             # Use the predicted state to draw a circle on the image
-            x = ...
-            y = ...
+            x = kf.x[0][0]
+            y = kf.x[1][0]
+            # print("KF X:", kf.x)
             cv2.circle(
                 self.img, (int(x), int(y)), 2, (255, 0, 0), -1
             )  # Blue color for predicted state

@@ -141,12 +141,12 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
     current_gate = 0
 
     # kalmans
-    process_var_translation = 0.1
-    measurement_var_translation = 0.5
+    process_var_translation = 1.5
+    measurement_var_translation = 1.5
     kf_translation = KalmanFilter(process_var_translation, measurement_var_translation, use_acceleration=True)
 
-    process_var_rotation = 0.1
-    measurement_var_rotation = 0.1
+    process_var_rotation = 1.5
+    measurement_var_rotation = 1.5
     kf_rotation = KalmanFilter(process_var_rotation, measurement_var_rotation, use_acceleration=False)
     
     # pids
@@ -167,29 +167,21 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
         output_limits=(-15, 15),
     )
 
-    pid_roll = PID(
-        gain_prop=0.1,
-        gain_int=0.01,
-        gain_der=0.06,
-        sensor_period=model.opt.timestep,
-        output_limits=(-10, 10),
-    )
+    # pid_roll = PID(
+    #     gain_prop=0.1,
+    #     gain_int=0.01,
+    #     gain_der=0.06,
+    #     sensor_period=model.opt.timestep,
+    #     output_limits=(-10, 10),
+    # )
 
-    pid_pitch = PID(
-        gain_prop=0.1,
-        gain_int=0.01,
-        gain_der=0.06,
-        sensor_period=model.opt.timestep,
-        output_limits=(-10, 10),
-    )
-
-    pid_yaw = PID(
-        gain_prop=0.1,
-        gain_int=0.1,
-        gain_der=0.1,
-        sensor_period=model.opt.timestep,
-        output_limits=(-100, 100),
-    )
+    # pid_pitch = PID(
+    #     gain_prop=0.1,
+    #     gain_int=0.01,
+    #     gain_der=0.06,
+    #     sensor_period=model.opt.timestep,
+    #     output_limits=(-10, 10),
+    # )
 
     pid_z = PID(
         gain_prop=100.0,
@@ -279,8 +271,6 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
             obj_points = []
             img_points = []
 
-            # Map index in the list 0..3 to 3D position (x, y, z)
-            # Centers at x=0.01 relative to gate body, markers on +X face means surface at x=0.11
             center_positions = [
                 np.array([0.11, 0.6, 0.65]),   # 0
                 np.array([0.11, -0.6, 0.65]),  # 1
@@ -291,15 +281,7 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
             # Marker half-size
             h = 0.1
             
-            # Define 4 corners relative to the center offset for each marker
-            # Based on Camera orientation (X_cam=Y_w, Y_cam=Z_w):
-            # Image Right (+X_cam) is World +Y.
-            # Image Down (+Y_cam) is World +Z.
-            # ArUco order: TL, TR, BR, BL.
-            # TL (Left, Top): Left=-Y, Top=-Z.  -> (-h, -h)
-            # TR (Right, Top): Right=+Y, Top=-Z. -> (+h, -h)
-            # BR (Right, Bottom): Right=+Y, Bottom=+Z. -> (+h, +h)
-            # BL (Left, Bottom): Left=-Y, Bottom=+Z. -> (-h, +h)
+            # Define 4 corners relative to the center of the marker
             marker_offsets = np.array([
                 [0, -h, -h], # TL
                 [0,  h, -h], # TR
@@ -334,6 +316,7 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
                     flags=cv2.SOLVEPNP_ITERATIVE
                 )
                 
+                pnp_rpy_deg = None
                 if success:
                     pnp_valid = True
                     
@@ -372,13 +355,14 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
                     # We need to rotate this vector by the drone's current orientation (from Kalman Filter)
                     # kf_rotation state is [roll, pitch, yaw] in degrees
                     # This vector represents (Gate_Position_World - Drone_Position_World) rotated into world axes
-                    rpy_rad = np.radians(kf_rotation.x.flatten()[:3])
-                    R_drone_to_world = Rotation.from_euler('xyz', rpy_rad).as_matrix()
-                    print(f"R_drone_to_world: \n{R_drone_to_world.round(3)}")
+                    # rpy_rad = np.radians(kf_rotation.x.flatten()[:3])
+                    # R_drone_to_world = Rotation.from_euler('xyz', rpy_rad).as_matrix()
+                    # print(f"R_drone_to_world: \n{R_drone_to_world.round(3)}")
                     
-                    pnp_position = R_drone_to_world @ vec_drone_to_gate_drone_frame
+                    pnp_position =  vec_drone_to_gate_drone_frame
+                    print(f"pnp_position (Drone Frame): {pnp_position.round(3)}")
 
-                    
+                    # Update Kalman Filter with position measurement 
                     measurement_pos = np.vstack((pnp_position.reshape(3,1), acc.reshape(3,1)))
                     kf_translation.update(measurement_pos)
                     kalman_position = kf_translation.x.flatten()[:3]
@@ -395,23 +379,12 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
                     
                     # Extract RPY in degrees from rotation matrix
                     pnp_rpy_deg = - Rotation.from_matrix(R_drone_to_gate).as_euler('xyz', degrees=True)
-                    
-                    print(f"pnp_rpy_deg: {pnp_rpy_deg.round(3)}")
-
-            if not pnp_valid:
-                # If PnP failed, we just predict (done above) and maybe rely on IMU
-                pass
-
 
             gyro = data.sensordata[gyro_id:gyro_id+3]    # [roll_rate, pitch_rate, yaw_rate]
-            # print(f"gyro: {gyro} rad/s")
-            
-            # Prepare measurement for Rotation KF (which expects 6x1: Pos[deg], Vel[deg/s])
             gyro_deg = np.degrees(gyro)
             
-            if not (pnp_valid and 'pnp_rpy_deg' in locals()):
-                # If no PnP data, use current estimated orientation (radians) as the measurement
-                # so the filter sees "zero error" for position and relies on Gyro for velocity update.
+            if not (pnp_valid and pnp_rpy_deg is not None):
+                # If no PnP data, use current estimated orientation as the measurement
                 pnp_rpy_deg = kf_rotation.x.flatten()[:3]
                 
             # Full update: Position (from PnP or Estimate) + Velocity (from Gyro)
@@ -419,54 +392,56 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
             
             # print(f"measurement_rot: {measurement_rot.T} (Pos+Vel)")
             kf_rotation.update(measurement_rot)
-            kalman_rotation = kf_rotation.x.flatten()[:3]
+
+            # kalman_rotation = kf_rotation.x.flatten()[:3]
 
             # print(f"pnp_position: {pnp_position.round(3)}")
-            print(f"kalman_position: {kf_translation.x.flatten().round(3)}")
-            print(f"kalman_rotation: {kf_rotation.x.flatten().round(3)}")
-            print(f"True rotation: {current_orien.round(3)}")
+            # print(f"kalman_position: {kf_translation.x.flatten().round(3)}")
+            # print(f"kalman_rotation: {kf_rotation.x.flatten().round(3)}")
+            # print(f"True rotation: {current_orien.round(3)}")
 
             # END OF TODO
 
-            # TODO make this fly
+            # make this fly
             # we want this drone to be in 0,0,0 in gate frame
             desired_position = np.array([-2.0, 0.0, -0.2])
-            target_x = desired_position[0]
-            target_y = desired_position[1]
 
-            prev_x = prev_state_position[0]
-            current_x = kalman_position[0]
+            # target_x = desired_position[0]
+            # target_y = desired_position[1]
 
-            prev_y = prev_state_position[1]
-            current_y = kalman_position[1]
+            # prev_x = prev_state_position[0]
+            # current_x = kalman_position[0]
+
+            # prev_y = prev_state_position[1]
+            # current_y = kalman_position[1]
 
             prev_z = prev_state_position[2]
             current_z = kalman_position[2]
 
-            prev_roll = prev_state_rotation[0]
-            current_roll = kalman_rotation[0]
+            # prev_roll = prev_state_rotation[0]
+            # current_roll = kalman_rotation[0]
 
-            prev_pitch = prev_state_rotation[1]
-            current_pitch = kalman_rotation[1]
+            # prev_pitch = prev_state_rotation[1]
+            # current_pitch = kalman_rotation[1]
 
-            prev_yaw = prev_state_rotation[2]
-            current_yaw = kalman_rotation[2]
+            # prev_yaw = prev_state_rotation[2]
+            # current_yaw = kalman_rotation[2]
+            # current_yaw_rad = math.radians(current_yaw)
 
-            desired_x_thrust = pid_x_thrust.output_signal(target_x, [current_x, prev_x])
-            desired_y_thrust = pid_y_thrust.output_signal(target_y, [current_y, prev_y])
+            # desired_x_thrust = pid_x_thrust.output_signal(target_x, [current_x, prev_x])
+            # desired_y_thrust = pid_y_thrust.output_signal(target_y, [current_y, prev_y])
 
             # based on current yaw, convert desired x and y thrust to desired roll and pitch
 
-            current_yaw_rad = math.radians(current_yaw)
-            desired_roll = - (
-                desired_x_thrust * math.sin(current_yaw_rad)
-                - desired_y_thrust * math.cos(current_yaw_rad)
-            )
-            desired_pitch = - (
-                + desired_x_thrust * math.cos(current_yaw_rad)
-                + desired_y_thrust * math.sin(current_yaw_rad)
-            )
-            print(f"desired_roll: {desired_roll} desired_pitch: {desired_pitch}")
+            # desired_roll = - (
+            #     desired_x_thrust * math.sin(current_yaw_rad)
+            #     - desired_y_thrust * math.cos(current_yaw_rad)
+            # )
+            # desired_pitch = - (
+            #     + desired_x_thrust * math.cos(current_yaw_rad)
+            #     + desired_y_thrust * math.sin(current_yaw_rad)
+            # )
+            # print(f"desired_roll: {desired_roll} desired_pitch: {desired_pitch}")
             # roll_thrust = - pid_roll.output_signal(
             #     desired_roll, [current_roll, prev_roll]
             # )
@@ -474,11 +449,12 @@ def run_single_task(*, wind: bool, rotated_gates: bool, flight_mode, rendering_f
             #     desired_pitch, [current_pitch, prev_pitch]
             # )
 
+            # Only trust can be controlled well
             thrust = - pid_z.output_signal(
                 commanded_variable=desired_position[2],
                 sensor_readings=[current_z, prev_z],
             )
-            print(f"thrust: {thrust} thrust roll : {roll_thrust} pitch: {pitch_thrust} current z: {current_z.round(3)} prev z: {prev_z.round(3)}")
+            # print(f"thrust: {thrust} thrust roll : {roll_thrust} pitch: {pitch_thrust} current z: {current_z.round(3)} prev z: {prev_z.round(3)}")
 
 
             # END OF TODO
